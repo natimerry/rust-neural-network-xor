@@ -1,21 +1,25 @@
-#![allow(clippy::needless_range_loop)]
-use rand::rngs::mock::StepRng;
-use rand::Rng;
-use shuffle::{irs::Irs, shuffler::Shuffler};
-use text_io::{self, read};
-use crate::files::{save_network, check_exist};
 use indicatif::ProgressBar;
-mod files;
+use rand::{rngs::mock::StepRng, Rng};
+use shuffle::{irs::Irs, shuffler::Shuffler};
+use std::fs::File;
+use std::{io::Write, usize};
+use text_io::{self, read};
 
-#[macro_use]
 extern crate savefile_derive;
 const NUM_INPUTS: usize = 2;
 const NUM_HIDDEN_NODES: usize = 2;
 const NUM_OUTPUTS: usize = 1;
 const NUM_TRAINING_SETS: usize = 4;
 
-#[derive(Savefile)]
-pub struct NueralNetwork{
+fn sigmoid(x: f64) -> f64 {
+    1.0 / (1.0 + f64::exp(-x))
+}
+fn d_sigmoid(x: f64) -> f64 {
+    x * (1.0 - x)
+}
+
+#[derive(savefile_derive::Savefile)]
+pub struct Network {
     epochs: i64,
     learning_rate: f64,
     output_layer: [f64; NUM_OUTPUTS],
@@ -25,168 +29,189 @@ pub struct NueralNetwork{
     hidden_weight: [[f64; NUM_INPUTS]; NUM_HIDDEN_NODES],
     output_weight: [[f64; NUM_HIDDEN_NODES]; NUM_OUTPUTS],
     training_input: [[f64; NUM_INPUTS]; NUM_TRAINING_SETS],
-    training_output: [[f64; NUM_OUTPUTS]; NUM_TRAINING_SETS] ,
+    training_output: [[f64; NUM_OUTPUTS]; NUM_TRAINING_SETS],
 }
-
-fn init_weights() -> f64 {
-    rand::thread_rng().gen()
+fn default() -> Network {
+    let net = Network {
+        epochs: 0,
+        learning_rate: 0.5,
+        output_layer: [0.0],
+        hidden_layer: [0.0, 0.0],
+        hidden_layer_bias: [0.0, 0.0],
+        output_layer_bias: [rand::thread_rng().gen()],
+        hidden_weight: [
+            [rand::thread_rng().gen(), rand::thread_rng().gen()],
+            [rand::thread_rng().gen(), rand::thread_rng().gen()],
+        ],
+        output_weight: [[0.0, 0.0]],
+        training_input: [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
+        training_output: [[0.0], [1.0], [1.0], [0.0]],
+    };
+    net
 }
-
-fn sigmoid(x: f64) -> f64 {
-    1.0 / (1.0 + f64::exp(-x))
+fn clear(){
+    print!("\x1B[2J\x1B[1;1H");
 }
-fn d_sigmoid(x: f64) -> f64 {
-    x * (1.0 - x)
+impl std::fmt::Debug for Network {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Network")
+            .field("Epochs", &self.epochs)
+            .field("Learning Rate", &self.learning_rate)
+            .field("Output Layer", &self.output_layer)
+            .field("Hidden Layer", &self.hidden_layer)
+            .field("Hidden Layer Bias", &self.hidden_layer_bias)
+            .field("Output Layer Bias", &self.output_layer_bias)
+            .field("Hidden Weight", &self.hidden_weight)
+            .field("Output Weight", &self.output_weight)
+            .field("Training Input", &self.training_input)
+            .field("Training Output", &self.training_output)
+            .finish()
+    }
 }
+impl Network {
+    pub fn train(&mut self) {
+        let mut training_set_order = vec![0, 1, 2, 3];
+        // create progress bar
+        let bar = ProgressBar::new(self.epochs.try_into().unwrap());
+        bar.set_style(
+            indicatif::ProgressStyle::with_template(
+                "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}",
+            )
+            .unwrap()
+            .progress_chars("##-"),
+        );
 
+        for _epoch in 0..self.epochs {
+            let _shuffle =
+                Irs::default().shuffle(&mut training_set_order, &mut StepRng::new(2, 13));
+            for x in 0..NUM_TRAINING_SETS {
+                let i = training_set_order[x];
+                if x % NUM_TRAINING_SETS == 0 {
+                    bar.inc(1);
+                }
 
-fn activate_network(network:&mut NueralNetwork,to_print:bool) {
-    // training
-    let mut training_set_order = vec![0, 1, 2, 3];
-    let to_loop_in_total = network.epochs;
-    let bar_t0=ProgressBar::new(to_loop_in_total.try_into().unwrap());
-    let sty = indicatif::ProgressStyle::with_template(
-        "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}",
-    ).unwrap().progress_chars("##-");
-    bar_t0.set_style(sty);
+                // Activate the hidden layer
+                // initial step-through the hidden layer
+                // steps through input layer to get the weighted sums of the INPUT*HIDDEN_WEIGHT and assign it to hidden node
+                // pass weighted sum through the sigmoid (activation) function
 
-    for _epoch in 0..network.epochs {
-        let _shuffle = Irs::default().shuffle(&mut training_set_order, &mut StepRng::new(2, 13));
-        for x in 0..NUM_TRAINING_SETS {       
-            let i = training_set_order[x];
-            if x % 4 == 0{
-                bar_t0.inc(1)
+                // TeX: σ(xᵢ⋅ wᵢ + b)
+                for j in 0..NUM_HIDDEN_NODES {
+                    let mut activation_hidden = self.hidden_layer_bias[j]; // assign current hidden layer bias value
+                                                                           // to var
+
+                    for k in 0..NUM_INPUTS {
+                        activation_hidden += self.training_input[i][k] * self.hidden_weight[k][j];
+                    }
+                    self.hidden_layer[j] = sigmoid(activation_hidden);
+                }
+                // same as above, but we now step through the hidden layer and output nodes instead
+                for j in 0..NUM_OUTPUTS {
+                    let mut activation_output = self.output_layer_bias[j];
+
+                    for k in 0..NUM_HIDDEN_NODES {
+                        activation_output += self.hidden_layer[k] * self.output_weight[j][k];
+                    }
+                    self.output_layer[j] = sigmoid(activation_output);
+                }
+
+                // backward propagate to reinforce learning :)
+                let mut delta_output: [f64; NUM_OUTPUTS] = [0.0];
+                for j in 0..NUM_OUTPUTS {
+                    let error: f64 = self.training_output[i as usize][j] - self.output_layer[j];
+                    delta_output[j] = error * d_sigmoid(self.output_layer[j]);
+                }
+
+                let mut delta_hidden: [f64; NUM_HIDDEN_NODES] = [0.0, 0.0];
+                for j in 0..NUM_HIDDEN_NODES {
+                    let mut error: f64 = 0.0;
+                    error += delta_output[0] * self.output_weight[0][j];
+                    delta_hidden[j] = error * d_sigmoid(self.hidden_layer[j]);
+                }
+
+                // After finding out the delta error rate we can use that to apply changes on our network
+
+                for j in 0..NUM_OUTPUTS {
+                    self.output_layer_bias[j] += delta_output[j] * self.learning_rate;
+                    for k in 0..NUM_HIDDEN_NODES {
+                        self.output_weight[0][k] +=
+                            self.hidden_layer[k] * delta_output[j] * self.learning_rate;
+                    }
+                }
+
+                for j in 0..NUM_HIDDEN_NODES {
+                    self.hidden_layer_bias[j] += delta_hidden[j] * self.learning_rate;
+                    for k in 0..NUM_INPUTS {
+                        self.hidden_weight[k][j] +=
+                            self.training_input[i][k] * delta_hidden[j] * self.learning_rate;
+                    }
+                }
             }
-            //computer hidden layer activation
+        }
+        bar.finish_with_message("Trained successfully");
+    }
+
+    pub fn run(&mut self) {
+        for i in 0..NUM_TRAINING_SETS {
             for j in 0..NUM_HIDDEN_NODES {
-                let mut activation_hidden = network.hidden_layer_bias[j];
+                let mut activation_hidden = self.hidden_layer_bias[j];
 
                 for k in 0..NUM_INPUTS {
-                    activation_hidden += network.training_input[i as usize][k] * network.hidden_weight[k][j];
+                    activation_hidden +=
+                        self.training_input[i as usize][k] * self.hidden_weight[k][j];
                 }
 
-                network.hidden_layer[j] = sigmoid(activation_hidden);
+                self.hidden_layer[j] = sigmoid(activation_hidden);
             }
 
             for j in 0..NUM_OUTPUTS {
-                let mut activation_output = network.output_layer_bias[j];
+                let mut activation_output = self.output_layer_bias[j];
 
                 for k in 0..NUM_HIDDEN_NODES {
-                    activation_output += network.hidden_layer[k] * network.output_weight[j][k];
+                    activation_output += self.hidden_layer[k] * self.output_weight[j][k];
                 }
-                network.output_layer[j] = sigmoid(activation_output);
+                self.output_layer[j] = sigmoid(activation_output);
             }
-            // reinforce learning in case of overflows
-        
-            if to_print {
-                println!(
-                    "Input: {:?}\tGot Output: {:?}\tExpected output: {:?}",
-                    (network.training_input[i as usize][0], network.training_input[i as usize][1]),
-                    network.output_layer[0],
-                    network.training_output[i as usize][0]
-                );
-            }
-            //backward prop
-
-            //compute change in output weights
-
-            let mut delta_output: [f64; NUM_OUTPUTS] = [0.0];
-            for j in 0..NUM_OUTPUTS {
-                let error: f64 = network.training_output[i as usize][j] - network.output_layer[j];
-                delta_output[j] = error * d_sigmoid(network.output_layer[j]);
-            }
-
-            let mut delta_hidden: [f64; NUM_HIDDEN_NODES] = [0.0, 0.0];
-            for j in 0..NUM_HIDDEN_NODES {
-                let mut error: f64 = 0.0;
-                error += delta_output[0] * network.output_weight[0][j];
-                delta_hidden[j] = error * d_sigmoid(network.hidden_layer[j]);
-            }
-
-            // Change apply
-            for j in 0..NUM_OUTPUTS {
-                network.output_layer_bias[j] += delta_output[j] * network.learning_rate;
-                for k in 0..NUM_HIDDEN_NODES {
-                    network.output_weight[0][k] += network.hidden_layer[k] * delta_output[j] * network.learning_rate;
-                }
-            }
-
-            network.hidden_layer_bias[0] += delta_hidden[0] * network.learning_rate;
-            for k in 0..NUM_INPUTS {
-                network.hidden_weight[k][0] +=
-                network.training_input[i as usize][k] * delta_hidden[0] * network.learning_rate;
-            }
-
-            network.hidden_layer_bias[1] += delta_hidden[1] * network.learning_rate;
-            for k in 0..NUM_INPUTS {
-                network.hidden_weight[k][1] +=
-                network.training_input[i as usize][k] * delta_hidden[1] * network.learning_rate;
-            }
+            println!(
+                "Input: {:?}\tGot Output: {:?}\tExpected output: {:?}",
+                (
+                    self.training_input[i as usize][0],
+                    self.training_input[i as usize][1]
+                ),
+                self.output_layer[0],
+                self.training_output[i as usize][0]
+            );
         }
-    }
-    bar_t0.finish_and_clear();
-}
-
-fn train(){
-    if files::check_exist("model.data"){
-        let mut nn:NueralNetwork = files::load_network();
-        print!("Enter epochs:");
-        nn.epochs=read!();
-        if nn.epochs >= 200_000_000{
-            println!("Epochs over 2 Million causes floating point exceptions\n\n");
-            nn.epochs=200_000_000;
-        }
-        activate_network(&mut nn, false);
-        save_network(&nn);
-    }
-    else{
-        print!("Enter epochs (no read): ");
-        let mut e:i64=read!();
-        if e >= 200_000_000{
-            println!("Epochs over 2 Million causes floating point exceptions\n\n");
-            e=200_000_000;
-        }
-        let mut nn:NueralNetwork = NueralNetwork{
-            epochs: e,
-            learning_rate: 0.5,
-            output_layer: [0.0],
-            hidden_layer: [0.0, 0.0],
-            hidden_layer_bias:[0.0, 0.0] ,
-            output_layer_bias:[init_weights()],
-            hidden_weight:  [
-                [init_weights(), init_weights()],
-                [init_weights(), init_weights()],
-            ],
-            output_weight:[[0.0, 0.0]],
-            training_input:[[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
-            training_output:[[0.0], [1.0], [1.0], [0.0]],
-        };
-        
-        activate_network(&mut nn, false);
-        save_network(&nn);
-        
     }
 }
 
-fn use_network(){
-    let mut nn= files::load_network();
-    nn.epochs=1;
-    activate_network(&mut nn, true);
-}
 fn main() {
+    let mut nn = default();
     loop {
-        print!("\n\n1- Train\n2- Run (requires trained model)\nEnter choice: ");
-        let choice:i32= read!();
-        if choice == 1{
-            train();
+        print!("1 --- Train the network\n2 --- Run the network\n3 --- Set custom training data\n");
+
+        print!("\nEnter choice:");
+        let choice: i64 = text_io::read!();
+
+        if choice == 1 {
+            print!("Enter number of epochs: ");
+            let epochs: i64 = text_io::read!();
+            nn.epochs = epochs;
+            nn.train();
         }
-        if choice==2{
-            if check_exist("model.data"){
-                use_network();
-            }
-            else {
-                print!("Model doesnt exist. Train first");
-            }
+        if choice == 2 {
+            clear();
+            nn.run();
+        }
+        if choice == 3 {
+            print!("Enter the first number: ");
+            let num1: i64 = text_io::read!();
+            print!("\nEnter the second number: ");
+            let num2: i64 = text_io::read!();
+            nn.training_input[0][0] = num1 as f64;
+            nn.training_input[0][1] = num2 as f64;
+            nn.training_output[0][0] = sigmoid((num1 ^ num2) as f64);
+            println!("\nNow run the network to try the new dataset!!!");
         }
     }
 }
